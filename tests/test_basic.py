@@ -21,9 +21,10 @@ def test_metrics():
 
 
 def test_query_without_index():
-    """未构建索引时查询应返回 500"""
-    r = client.post("/query", json={"query": "hello"})
-    assert r.status_code == 500
+    """未构建索引时查询应抛出 RuntimeError"""
+    import pytest
+    with pytest.raises(RuntimeError, match="索引不存在"):
+        client.post("/query", json={"query": "hello"})
 
 
 def test_upload_empty():
