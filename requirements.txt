@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+requests
+python-dotenv
+prometheus-client
+sentence-transformers
+faiss-cpu
+pytest
+httpx
+black
+flake8
