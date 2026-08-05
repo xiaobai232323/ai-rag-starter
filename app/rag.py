@@ -13,10 +13,8 @@ import hashlib
 from pathlib import Path
 from typing import List, Dict, Any
 
-import numpy as np
-import faiss
-import requests
-from sentence_transformers import SentenceTransformer
+# 重量级依赖延迟导入，以加速 CI 和冷启动
+# numpy / faiss / SentenceTransformer 仅在首次调用嵌入或索引时加载
 
 
 class RAGEngine:
@@ -42,8 +40,9 @@ class RAGEngine:
 
     # ── 嵌入模型懒加载 ──────────────────────────────────────
 
-    def _load_embedder(self) -> SentenceTransformer:
+    def _load_embedder(self):
         if self._embedder is None:
+            from sentence_transformers import SentenceTransformer
             print(f"[RAG] 加载嵌入模型: {self.embedding_model_name}")
             self._embedder = SentenceTransformer(self.embedding_model_name)
         return self._embedder
@@ -75,6 +74,8 @@ class RAGEngine:
 
     def build_index(self):
         """构建 FAISS 向量索引并持久化到磁盘"""
+        import faiss
+        import numpy as np
         docs = self._load_docs()
         if not docs:
             print("[RAG] 没有需要索引的文档。")
@@ -103,6 +104,7 @@ class RAGEngine:
 
     def _ensure_index(self):
         """确保索引已加载到内存"""
+        import faiss
         if self._index is None:
             if Path(self.index_path).exists() and Path(self.meta_path).exists():
                 self._index = faiss.read_index(self.index_path)
@@ -113,9 +115,11 @@ class RAGEngine:
 
     # ── 查询嵌入 ────────────────────────────────────────────
 
-    def _embed_query(self, q: str) -> np.ndarray:
+    def _embed_query(self, q: str):
         """对查询文本做嵌入，可选 OpenAI embedding（通过 FORCE_OPENAI_EMBEDDING 控制）"""
+        import numpy as np
         if self.openai_key and os.getenv("FORCE_OPENAI_EMBEDDING", ""):
+            import requests
             url = "https://api.openai.com/v1/embeddings"
             headers = {"Authorization": f"Bearer {self.openai_key}"}
             body = {"input": q, "model": "text-embedding-3-small"}
@@ -130,6 +134,7 @@ class RAGEngine:
 
     def query(self, q: str, top_k: int = 3) -> Dict[str, Any]:
         """检索 top_k 个最相关文档片段，可选 OpenAI 合成回答"""
+        import numpy as np
         self._ensure_index()
         q_emb = self._embed_query(q)
 
@@ -194,6 +199,7 @@ class RAGEngine:
         }
 
         try:
+            import requests
             r = requests.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={

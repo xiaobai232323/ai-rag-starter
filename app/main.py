@@ -17,8 +17,15 @@ app = FastAPI(title="AI RAG Starter")
 # Prometheus 指标：RAG 请求计数
 rag_requests_total = Counter("rag_requests_total", "RAG 查询总次数")
 
-# 启动时初始化 RAG 引擎（embedder 延迟加载）
-engine = RAGEngine()
+# RAG 引擎延迟初始化（避免 import 时加载 heavy deps，CI 友好）
+_engine = None
+
+
+def get_engine() -> RAGEngine:
+    global _engine
+    if _engine is None:
+        _engine = RAGEngine()
+    return _engine
 
 
 class QueryRequest(BaseModel):
@@ -44,15 +51,16 @@ async def upload(file: UploadFile = File(...)):
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="文件为空")
-    saved_path = engine.save_document(file.filename, content)
+    saved_path = get_engine().save_document(file.filename, content)
     return {"saved": saved_path}
 
 
 @app.post("/index")
 def build_index():
     """构建 FAISS 向量索引并持久化"""
-    engine.build_index()
-    return {"status": "indexed", "index_path": engine.index_path}
+    eng = get_engine()
+    eng.build_index()
+    return {"status": "indexed", "index_path": eng.index_path}
 
 
 @app.post("/query")
@@ -60,5 +68,5 @@ def query(req: QueryRequest):
     """查询接口：检索 + 可选 LLM 合成回答"""
     rag_requests_total.inc()
     top_k = int(os.getenv("TOP_K", "3"))
-    result = engine.query(req.query, top_k=top_k)
+    result = get_engine().query(req.query, top_k=top_k)
     return result

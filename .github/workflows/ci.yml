@@ -19,4 +19,6 @@ jobs:
           pip install fastapi uvicorn[standard] pytest httpx python-dotenv prometheus-client
 
       - name: Run tests
+        env:
+          PYTHONPATH: .
         run: pytest -q
