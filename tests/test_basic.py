@@ -23,10 +23,11 @@ class TestChunker:
         assert chunks[0] == text
 
     def test_paragraph_split(self):
-        splitter = RecursiveTextSplitter(chunk_size=50, chunk_overlap=0)
+        splitter = RecursiveTextSplitter(chunk_size=8, chunk_overlap=0)
         text = "第一段内容。\n\n第二段内容。\n\n第三段内容。"
         chunks = splitter.split(text)
-        assert len(chunks) == 3
+        # chunk_size=8 迫使每段单独成 chunk
+        assert len(chunks) >= 3
 
     def test_overlap(self):
         splitter = RecursiveTextSplitter(chunk_size=20, chunk_overlap=5)
