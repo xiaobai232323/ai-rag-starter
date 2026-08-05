@@ -1,5 +1,10 @@
 """
-RAG 引擎核心：文档存储、嵌入、FAISS 索引、查询检索、LLM 合成回答。
+RAG 引擎核心：文档存储、嵌入、FAISS 索引、检索、LLM 合成回答。
+
+改动说明：
+- _llm_synthesize 使用 OpenAI Chat Completions（可配置模型 via OPENAI_CHAT_MODEL，默认 gpt-3.5-turbo）
+- 返回的生成回答会要求模型在回答中引用来源编号（[来源1] 等），并且在失败时回退到拼接的检索片段
+- 嵌入与索引逻辑保持不变
 """
 
 import os
@@ -25,6 +30,8 @@ class RAGEngine:
 
         self.embedding_model_name = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
         self.openai_key = os.getenv("OPENAI_API_KEY", "")
+        # OpenAI chat model name (configurable)
+        self.openai_chat_model = os.getenv("OPENAI_CHAT_MODEL", "gpt-3.5-turbo")
 
         self._embedder = None
         self._index = None
@@ -44,7 +51,7 @@ class RAGEngine:
     # ── 文档管理 ────────────────────────────────────────────
 
     def save_document(self, filename: str, content: bytes) -> str:
-        """保存文档到 docs_dir，按行分割用于后续索引"""
+        """保存文档到 docs_dir，按段落分割用于后续索引"""
         h = hashlib.sha1(content).hexdigest()[:10]
         out_name = f"{h}_{filename}"
         out_path = self.docs_dir / out_name
@@ -107,7 +114,7 @@ class RAGEngine:
     # ── 查询嵌入 ────────────────────────────────────────────
 
     def _embed_query(self, q: str) -> np.ndarray:
-        """对查询文本做嵌入，可选 OpenAI embedding"""
+        """对查询文本做嵌入，可选 OpenAI embedding（通过 FORCE_OPENAI_EMBEDDING 控制）"""
         if self.openai_key and os.getenv("FORCE_OPENAI_EMBEDDING", ""):
             url = "https://api.openai.com/v1/embeddings"
             headers = {"Authorization": f"Bearer {self.openai_key}"}
@@ -143,28 +150,48 @@ class RAGEngine:
             })
 
         # 拼接检索到的片段作为基础回答
-        answer = "\n\n".join([r["text"] for r in results])
+        concat_answer = "\n\n".join([r["text"] for r in results])
 
-        # 若有 OpenAI key，尝试生成式合成回答
+        # 若有 OpenAI key，尝试生成式合成回答；否则返回拼接片段
         if self.openai_key:
-            answer = self._llm_synthesize(q, results)
+            synth = self._llm_synthesize(q, results)
+            return {"query": q, "results": results, "answer": synth}
 
-        return {"query": q, "results": results, "answer": answer}
+        return {"query": q, "results": results, "answer": concat_answer}
 
-    # ── LLM 合成回答（OpenAI） ──────────────────────────────
+    # ── LLM 合成回答（OpenAI Chat Completions） ──────────────────────────────
 
     def _llm_synthesize(self, query: str, results: List[Dict]) -> str:
-        """调用 OpenAI Chat API 基于检索结果生成回答"""
-        context = "\n\n".join(
-            [f"[来源{i+1}] {r['text']}" for i, r in enumerate(results)]
-        )
+        """调用 OpenAI Chat API 基于检索结果生成带引用的回答
+
+        要求模型：
+        - 仅基于提供的上下文回答
+        - 如无法从上下文回答则返回“信息不足”
+        - 在回答中引用来源编号，例如 [来源1]
+        """
+        if not results:
+            return "信息不足：没有检索到相关内容。"
+
+        context = "\n\n".join([f"[来源{i+1}] {r['text']}" for i, r in enumerate(results)])
+
         system_prompt = (
             "你是一个基于文档回答问题的助手。"
-            "请仅使用下面提供的上下文回答问题。"
-            "如果上下文不足以回答，请如实说'信息不足'。"
-            "回答时请引用来源编号。"
+            "请严格只使用下面提供的上下文回答问题。"
+            "如果上下文不足以回答，请如实说 '信息不足'。"
+            "回答时请在相关句子后使用来源编号，例如 [来源1]。"
         )
+
         user_message = f"上下文:\n{context}\n\n问题: {query}"
+
+        payload = {
+            "model": self.openai_chat_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 500,
+        }
 
         try:
             r = requests.post(
@@ -173,20 +200,17 @@ class RAGEngine:
                     "Authorization": f"Bearer {self.openai_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": "gpt-4o-mini",
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 500,
-                },
+                json=payload,
                 timeout=30,
             )
             r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"]
+            j = r.json()
+            # defensive access
+            choice = j.get("choices", [{}])[0]
+            msg = choice.get("message", {}).get("content") if isinstance(choice, dict) else None
+            if not msg:
+                return concat_answer
+            return msg
         except Exception as e:
             print(f"[RAG] LLM 合成失败，回退到拼接回答: {e}")
-            # 回退到简单拼接
-            return "\n\n".join([r["text"] for r in results])
+            return concat_answer
