@@ -104,9 +104,9 @@ class RAGEngine:
 
     def _ensure_index(self):
         """确保索引已加载到内存"""
-        import faiss
         if self._index is None:
             if Path(self.index_path).exists() and Path(self.meta_path).exists():
+                import faiss
                 self._index = faiss.read_index(self.index_path)
                 with open(self.meta_path, "r", encoding="utf-8") as f:
                     self._metas = json.load(f)
