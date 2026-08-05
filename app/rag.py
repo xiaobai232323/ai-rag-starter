@@ -1,10 +1,10 @@
 """
 RAG 引擎核心：文档存储、嵌入、FAISS 索引、检索、LLM 合成回答。
 
-改动说明：
-- _llm_synthesize 使用 OpenAI Chat Completions（可配置模型 via OPENAI_CHAT_MODEL，默认 gpt-3.5-turbo）
-- 返回的生成回答会要求模型在回答中引用来源编号（[来源1] 等），并且在失败时回退到拼接的检索片段
-- 嵌入与索引逻辑保持不变
+v0.2.0 增强：
+- 递归文本分割器（RecursiveTextSplitter），支持 chunk_size + chunk_overlap
+- PDF / DOCX 文档解析（通过 app.parsers）
+- 来源标注（source + chunk_index）
 """
 
 import os
@@ -12,6 +12,8 @@ import json
 import hashlib
 from pathlib import Path
 from typing import List, Dict, Any
+
+from .chunker import RecursiveTextSplitter
 
 # 重量级依赖延迟导入，以加速 CI 和冷启动
 # numpy / faiss / SentenceTransformer 仅在首次调用嵌入或索引时加载
@@ -28,8 +30,15 @@ class RAGEngine:
 
         self.embedding_model_name = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
         self.openai_key = os.getenv("OPENAI_API_KEY", "")
-        # OpenAI chat model name (configurable)
         self.openai_chat_model = os.getenv("OPENAI_CHAT_MODEL", "gpt-3.5-turbo")
+
+        # 文本分割配置
+        self.chunk_size = int(os.getenv("CHUNK_SIZE", "500"))
+        self.chunk_overlap = int(os.getenv("CHUNK_OVERLAP", "50"))
+        self.chunker = RecursiveTextSplitter(
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+        )
 
         self._embedder = None
         self._index = None
@@ -58,16 +67,33 @@ class RAGEngine:
         return str(out_path)
 
     def _load_docs(self) -> List[Dict[str, Any]]:
-        """加载所有文档并按段落切分"""
+        """加载所有文档，使用解析器 + 递归分割器切分为 chunks"""
+        from .parsers import parse_file
+
         docs = []
         for p in sorted(self.docs_dir.glob("*")):
             if p.is_dir():
                 continue
-            text = p.read_text(errors="ignore")
-            # 简单按空行切段落
-            parts = [s.strip() for s in text.split("\n\n") if s.strip()]
-            for i, part in enumerate(parts):
-                docs.append({"id": f"{p.name}_{i}", "text": part, "source": str(p)})
+            try:
+                text = parse_file(p)
+            except ImportError as e:
+                print(f"[RAG] 跳过 {p.name}: {e}")
+                continue
+            except Exception as e:
+                print(f"[RAG] 解析失败 {p.name}: {e}")
+                continue
+
+            # 使用递归分割器切分
+            chunks = self.chunker.split(text)
+            for i, chunk in enumerate(chunks):
+                docs.append({
+                    "id": f"{p.name}_chunk{i}",
+                    "text": chunk,
+                    "source": str(p),
+                    "chunk_index": i,
+                })
+
+        print(f"[RAG] 共加载 {len(docs)} 个文本块（chunk_size={self.chunk_size}, overlap={self.chunk_overlap}）")
         return docs
 
     # ── 索引构建 ────────────────────────────────────────────
@@ -91,7 +117,8 @@ class RAGEngine:
         faiss.write_index(index, self.index_path)
 
         metas = [
-            {"id": d["id"], "text": d["text"], "source": d["source"]} for d in docs
+            {"id": d["id"], "text": d["text"], "source": d["source"], "chunk_index": d.get("chunk_index", 0)}
+            for d in docs
         ]
         with open(self.meta_path, "w", encoding="utf-8") as f:
             json.dump(metas, f, ensure_ascii=False, indent=2)
@@ -150,7 +177,8 @@ class RAGEngine:
             results.append({
                 "score": float(dist),
                 "id": meta["id"],
-                "source": meta["source"],
+                "source": meta.get("source", ""),
+                "chunk_index": meta.get("chunk_index", 0),
                 "text": meta["text"],
             })
 

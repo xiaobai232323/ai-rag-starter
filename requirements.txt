@@ -7,6 +7,11 @@ python-dotenv
 prometheus-client
 sentence-transformers
 faiss-cpu
+numpy
+# 可选：PDF / DOCX 解析
+PyPDF2
+python-docx
+# 开发
 pytest
 httpx
 black
